@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="km">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Khmer Subtitle AI</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#1e64c8" />
+<link rel="icon" href="icons/icon-192.png" />
+<style>
+  :root {
+    --primary: #1e64c8;
+    --bg: #f5f7fb;
+    --card: #ffffff;
+    --text: #1a1a1a;
+    box-sizing: border-box;
+  }
+  * { box-sizing: inherit; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans Khmer", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: env(safe-area-inset-top,0) 16px env(safe-area-inset-bottom,0);
+    min-height: 100vh;
+  }
+  header {
+    padding: 20px 0 8px;
+  }
+  h1 { font-size: 1.3rem; margin: 0 0 4px; color: var(--primary); }
+  p.sub { margin: 0; color: #555; font-size: 0.9rem; }
+  .card {
+    background: var(--card);
+    border-radius: 14px;
+    padding: 18px;
+    margin: 16px 0;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+  label { display:block; font-weight:600; margin-bottom:6px; font-size:0.9rem; }
+  input[type=file] { width: 100%; }
+  input[type=password], input[type=text] {
+    width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #ccc; font-size: 1rem;
+  }
+  button {
+    background: var(--primary); color: #fff; border: none; border-radius: 10px;
+    padding: 12px 18px; font-size: 1rem; width: 100%; margin-top: 10px; cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; }
+  button.secondary { background: #eee; color: #333; }
+  .status { margin-top: 12px; font-size: 0.9rem; color: #333; white-space: pre-wrap; }
+  progress { width: 100%; margin-top: 10px; }
+  pre.srt {
+    max-height: 300px; overflow-y: auto; background: #f0f0f0; padding: 10px;
+    border-radius: 8px; font-size: 0.85rem; white-space: pre-wrap;
+  }
+  .note { font-size: 0.8rem; color: #888; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🎬 Khmer Subtitle AI</h1>
+  <p class="sub">Video → ស្តាប់សំឡេង → ស្គាល់ភាសា → បកប្រែជាខ្មែរ → Subtitle (.srt)</p>
+</header>
+
+<div class="card">
+  <label for="apiKey">Gemini API Key</label>
+  <input type="password" id="apiKey" placeholder="ដាក់ API key របស់អ្នកនៅទីនេះ" />
+  <p class="note">Key ត្រូវបានរក្សាទុកតែក្នុងទូរស័ព្ទអ្នក (localStorage) មិនផ្ញើទៅណាក្រៅពី Google Gemini ទេ។ ទទួល key ឥតគិតថ្លៃពី
+    <a href="https://aistudio.google.com/app/apikey" target="_blank">aistudio.google.com</a></p>
+</div>
+
+<div class="card">
+  <label for="videoFile">ជ្រើសរើសវីដេអូ</label>
+  <input type="file" id="videoFile" accept="video/*" />
+  <button id="runBtn">ចាប់ផ្តើមបង្កើត Subtitle</button>
+  <progress id="progressBar" value="0" max="100" style="display:none;"></progress>
+  <div class="status" id="status"></div>
+</div>
+
+<div class="card" id="resultCard" style="display:none;">
+  <label>លទ្ធផល SRT (ភាសាខ្មែរ)</label>
+  <pre class="srt" id="srtOutput"></pre>
+  <button id="downloadBtn" class="secondary">ទាញយកជា .srt</button>
+</div>
+
+<script>
+const apiKeyInput = document.getElementById('apiKey');
+const videoInput = document.getElementById('videoFile');
+const runBtn = document.getElementById('runBtn');
+const statusEl = document.getElementById('status');
+const progressBar = document.getElementById('progressBar');
+const resultCard = document.getElementById('resultCard');
+const srtOutput = document.getElementById('srtOutput');
+const downloadBtn = document.getElementById('downloadBtn');
+
+// Restore saved API key
+apiKeyInput.value = localStorage.getItem('gemini_api_key') || '';
+apiKeyInput.addEventListener('change', () => {
+  localStorage.setItem('gemini_api_key', apiKeyInput.value.trim());
+});
+
+let lastSrt = null;
+
+function setStatus(msg) {
+  statusEl.textContent = msg;
+}
+
+function guessMime(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  const map = { mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska', webm: 'video/webm', '3gp': 'video/3gpp' };
+  return map[ext] || 'video/mp4';
+}
+
+async function uploadVideo(apiKey, file) {
+  const mimeType = guessMime(file.name);
+  const startRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`, {
+    method: 'POST',
+    headers: {
+      'X-Goog-Upload-Protocol': 'resumable',
+      'X-Goog-Upload-Command': 'start',
+      'X-Goog-Upload-Header-Content-Length': file.size.toString(),
+      'X-Goog-Upload-Header-Content-Type': mimeType,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ file: { display_name: file.name } })
+  });
+  if (!startRes.ok) throw new Error('Upload start failed: ' + await startRes.text());
+  const uploadUrl = startRes.headers.get('X-Goog-Upload-URL');
+  if (!uploadUrl) throw new Error('គ្មាន upload URL ត្រឡប់មកវិញទេ');
+
+  const uploadRes = await fetch(uploadUrl, {
+    method: 'POST',
+    headers: {
+      'X-Goog-Upload-Offset': '0',
+      'X-Goog-Upload-Command': 'upload, finalize'
+    },
+    body: file
+  });
+  if (!uploadRes.ok) throw new Error('Upload failed: ' + await uploadRes.text());
+  const json = await uploadRes.json();
+  return { fileUri: json.file.uri, fileName: json.file.name, mimeType };
+}
+
+async function waitUntilActive(apiKey, fileName) {
+  for (let i = 0; i < 30; i++) {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`);
+    const json = await res.json();
+    if (json.state === 'ACTIVE') return;
+    if (json.state === 'FAILED') throw new Error('ការដំណើរការវីដេអូបានបរាជ័យ');
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  throw new Error('អស់ពេលរង់ចាំឯកសារឲ្យ Active');
+}
+
+async function generateSubtitles(apiKey, fileUri, mimeType) {
+  const prompt = `អ្នកគឺជាអ្នកជំនាញបកប្រែនិងធ្វើ subtitle។
+សូមស្តាប់សំឡេងនិយាយក្នុងវីដេអូនេះ:
+1. ស្គាល់ភាសាដើមដែលគេនិយាយ (auto-detect language)
+2. សរសេរអត្ថបទសំដីទាំងអស់តាមលំដាប់ពេលវេលា
+3. បកប្រែជាភាសាខ្មែរ ឲ្យបានត្រឹមត្រូវតាមបរិបទ (natural Khmer)
+4. បង្កើតជា subtitle ទម្រង់ SRT ស្តង់ដារ (លេខរៀង, timestamp HH:MM:SS,mmm --> HH:MM:SS,mmm, អត្ថបទខ្មែរតែប៉ុណ្ណោះ)
+
+ឆ្លើយតបជា JSON ប៉ុណ្ណោះ គ្មានអត្ថបទផ្សេងក្រៅពី JSON:
+{"detected_language": "...", "srt": "..."}`;
+
+  const model = 'gemini-2.5-flash';
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { file_data: { mime_type: mimeType, file_uri: fileUri } },
+          { text: prompt }
+        ]
+      }],
+      generationConfig: { response_mime_type: 'application/json', temperature: 0.2 }
+    })
+  });
+  if (!res.ok) throw new Error('Gemini API error: ' + await res.text());
+  const json = await res.json();
+  const text = json.candidates[0].content.parts[0].text;
+  return JSON.parse(text);
+}
+
+runBtn.addEventListener('click', async () => {
+  const apiKey = apiKeyInput.value.trim();
+  const file = videoInput.files[0];
+  if (!apiKey) { setStatus('សូមដាក់ Gemini API Key'); return; }
+  if (!file) { setStatus('សូមជ្រើសរើសវីដេអូ'); return; }
+
+  localStorage.setItem('gemini_api_key', apiKey);
+  runBtn.disabled = true;
+  resultCard.style.display = 'none';
+  progressBar.style.display = 'block';
+  progressBar.removeAttribute('value');
+
+  try {
+    setStatus('កំពុង Upload វីដេអូទៅ Gemini...');
+    const { fileUri, fileName, mimeType } = await uploadVideo(apiKey, file);
+
+    setStatus('កំពុងដំណើរការវីដេអូ (Gemini កំពុងវិភាគ)...');
+    await waitUntilActive(apiKey, fileName);
+
+    setStatus('កំពុងស្តាប់សំឡេង ស្គាល់ភាសា និងបកប្រែជាខ្មែរ...');
+    const result = await generateSubtitles(apiKey, fileUri, mimeType);
+
+    lastSrt = result.srt;
+    srtOutput.textContent = result.srt;
+    resultCard.style.display = 'block';
+    setStatus(`រួចរាល់! ភាសាដើមរកឃើញ៖ ${result.detected_language}`);
+  } catch (err) {
+    setStatus('កំហុស៖ ' + err.message);
+  } finally {
+    runBtn.disabled = false;
+    progressBar.style.display = 'none';
+  }
+});
+
+downloadBtn.addEventListener('click', () => {
+  if (!lastSrt) return;
+  const blob = new Blob([lastSrt], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'khmer_subtitle.srt';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+});
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
+</script>
+
+</body>
+</html>
